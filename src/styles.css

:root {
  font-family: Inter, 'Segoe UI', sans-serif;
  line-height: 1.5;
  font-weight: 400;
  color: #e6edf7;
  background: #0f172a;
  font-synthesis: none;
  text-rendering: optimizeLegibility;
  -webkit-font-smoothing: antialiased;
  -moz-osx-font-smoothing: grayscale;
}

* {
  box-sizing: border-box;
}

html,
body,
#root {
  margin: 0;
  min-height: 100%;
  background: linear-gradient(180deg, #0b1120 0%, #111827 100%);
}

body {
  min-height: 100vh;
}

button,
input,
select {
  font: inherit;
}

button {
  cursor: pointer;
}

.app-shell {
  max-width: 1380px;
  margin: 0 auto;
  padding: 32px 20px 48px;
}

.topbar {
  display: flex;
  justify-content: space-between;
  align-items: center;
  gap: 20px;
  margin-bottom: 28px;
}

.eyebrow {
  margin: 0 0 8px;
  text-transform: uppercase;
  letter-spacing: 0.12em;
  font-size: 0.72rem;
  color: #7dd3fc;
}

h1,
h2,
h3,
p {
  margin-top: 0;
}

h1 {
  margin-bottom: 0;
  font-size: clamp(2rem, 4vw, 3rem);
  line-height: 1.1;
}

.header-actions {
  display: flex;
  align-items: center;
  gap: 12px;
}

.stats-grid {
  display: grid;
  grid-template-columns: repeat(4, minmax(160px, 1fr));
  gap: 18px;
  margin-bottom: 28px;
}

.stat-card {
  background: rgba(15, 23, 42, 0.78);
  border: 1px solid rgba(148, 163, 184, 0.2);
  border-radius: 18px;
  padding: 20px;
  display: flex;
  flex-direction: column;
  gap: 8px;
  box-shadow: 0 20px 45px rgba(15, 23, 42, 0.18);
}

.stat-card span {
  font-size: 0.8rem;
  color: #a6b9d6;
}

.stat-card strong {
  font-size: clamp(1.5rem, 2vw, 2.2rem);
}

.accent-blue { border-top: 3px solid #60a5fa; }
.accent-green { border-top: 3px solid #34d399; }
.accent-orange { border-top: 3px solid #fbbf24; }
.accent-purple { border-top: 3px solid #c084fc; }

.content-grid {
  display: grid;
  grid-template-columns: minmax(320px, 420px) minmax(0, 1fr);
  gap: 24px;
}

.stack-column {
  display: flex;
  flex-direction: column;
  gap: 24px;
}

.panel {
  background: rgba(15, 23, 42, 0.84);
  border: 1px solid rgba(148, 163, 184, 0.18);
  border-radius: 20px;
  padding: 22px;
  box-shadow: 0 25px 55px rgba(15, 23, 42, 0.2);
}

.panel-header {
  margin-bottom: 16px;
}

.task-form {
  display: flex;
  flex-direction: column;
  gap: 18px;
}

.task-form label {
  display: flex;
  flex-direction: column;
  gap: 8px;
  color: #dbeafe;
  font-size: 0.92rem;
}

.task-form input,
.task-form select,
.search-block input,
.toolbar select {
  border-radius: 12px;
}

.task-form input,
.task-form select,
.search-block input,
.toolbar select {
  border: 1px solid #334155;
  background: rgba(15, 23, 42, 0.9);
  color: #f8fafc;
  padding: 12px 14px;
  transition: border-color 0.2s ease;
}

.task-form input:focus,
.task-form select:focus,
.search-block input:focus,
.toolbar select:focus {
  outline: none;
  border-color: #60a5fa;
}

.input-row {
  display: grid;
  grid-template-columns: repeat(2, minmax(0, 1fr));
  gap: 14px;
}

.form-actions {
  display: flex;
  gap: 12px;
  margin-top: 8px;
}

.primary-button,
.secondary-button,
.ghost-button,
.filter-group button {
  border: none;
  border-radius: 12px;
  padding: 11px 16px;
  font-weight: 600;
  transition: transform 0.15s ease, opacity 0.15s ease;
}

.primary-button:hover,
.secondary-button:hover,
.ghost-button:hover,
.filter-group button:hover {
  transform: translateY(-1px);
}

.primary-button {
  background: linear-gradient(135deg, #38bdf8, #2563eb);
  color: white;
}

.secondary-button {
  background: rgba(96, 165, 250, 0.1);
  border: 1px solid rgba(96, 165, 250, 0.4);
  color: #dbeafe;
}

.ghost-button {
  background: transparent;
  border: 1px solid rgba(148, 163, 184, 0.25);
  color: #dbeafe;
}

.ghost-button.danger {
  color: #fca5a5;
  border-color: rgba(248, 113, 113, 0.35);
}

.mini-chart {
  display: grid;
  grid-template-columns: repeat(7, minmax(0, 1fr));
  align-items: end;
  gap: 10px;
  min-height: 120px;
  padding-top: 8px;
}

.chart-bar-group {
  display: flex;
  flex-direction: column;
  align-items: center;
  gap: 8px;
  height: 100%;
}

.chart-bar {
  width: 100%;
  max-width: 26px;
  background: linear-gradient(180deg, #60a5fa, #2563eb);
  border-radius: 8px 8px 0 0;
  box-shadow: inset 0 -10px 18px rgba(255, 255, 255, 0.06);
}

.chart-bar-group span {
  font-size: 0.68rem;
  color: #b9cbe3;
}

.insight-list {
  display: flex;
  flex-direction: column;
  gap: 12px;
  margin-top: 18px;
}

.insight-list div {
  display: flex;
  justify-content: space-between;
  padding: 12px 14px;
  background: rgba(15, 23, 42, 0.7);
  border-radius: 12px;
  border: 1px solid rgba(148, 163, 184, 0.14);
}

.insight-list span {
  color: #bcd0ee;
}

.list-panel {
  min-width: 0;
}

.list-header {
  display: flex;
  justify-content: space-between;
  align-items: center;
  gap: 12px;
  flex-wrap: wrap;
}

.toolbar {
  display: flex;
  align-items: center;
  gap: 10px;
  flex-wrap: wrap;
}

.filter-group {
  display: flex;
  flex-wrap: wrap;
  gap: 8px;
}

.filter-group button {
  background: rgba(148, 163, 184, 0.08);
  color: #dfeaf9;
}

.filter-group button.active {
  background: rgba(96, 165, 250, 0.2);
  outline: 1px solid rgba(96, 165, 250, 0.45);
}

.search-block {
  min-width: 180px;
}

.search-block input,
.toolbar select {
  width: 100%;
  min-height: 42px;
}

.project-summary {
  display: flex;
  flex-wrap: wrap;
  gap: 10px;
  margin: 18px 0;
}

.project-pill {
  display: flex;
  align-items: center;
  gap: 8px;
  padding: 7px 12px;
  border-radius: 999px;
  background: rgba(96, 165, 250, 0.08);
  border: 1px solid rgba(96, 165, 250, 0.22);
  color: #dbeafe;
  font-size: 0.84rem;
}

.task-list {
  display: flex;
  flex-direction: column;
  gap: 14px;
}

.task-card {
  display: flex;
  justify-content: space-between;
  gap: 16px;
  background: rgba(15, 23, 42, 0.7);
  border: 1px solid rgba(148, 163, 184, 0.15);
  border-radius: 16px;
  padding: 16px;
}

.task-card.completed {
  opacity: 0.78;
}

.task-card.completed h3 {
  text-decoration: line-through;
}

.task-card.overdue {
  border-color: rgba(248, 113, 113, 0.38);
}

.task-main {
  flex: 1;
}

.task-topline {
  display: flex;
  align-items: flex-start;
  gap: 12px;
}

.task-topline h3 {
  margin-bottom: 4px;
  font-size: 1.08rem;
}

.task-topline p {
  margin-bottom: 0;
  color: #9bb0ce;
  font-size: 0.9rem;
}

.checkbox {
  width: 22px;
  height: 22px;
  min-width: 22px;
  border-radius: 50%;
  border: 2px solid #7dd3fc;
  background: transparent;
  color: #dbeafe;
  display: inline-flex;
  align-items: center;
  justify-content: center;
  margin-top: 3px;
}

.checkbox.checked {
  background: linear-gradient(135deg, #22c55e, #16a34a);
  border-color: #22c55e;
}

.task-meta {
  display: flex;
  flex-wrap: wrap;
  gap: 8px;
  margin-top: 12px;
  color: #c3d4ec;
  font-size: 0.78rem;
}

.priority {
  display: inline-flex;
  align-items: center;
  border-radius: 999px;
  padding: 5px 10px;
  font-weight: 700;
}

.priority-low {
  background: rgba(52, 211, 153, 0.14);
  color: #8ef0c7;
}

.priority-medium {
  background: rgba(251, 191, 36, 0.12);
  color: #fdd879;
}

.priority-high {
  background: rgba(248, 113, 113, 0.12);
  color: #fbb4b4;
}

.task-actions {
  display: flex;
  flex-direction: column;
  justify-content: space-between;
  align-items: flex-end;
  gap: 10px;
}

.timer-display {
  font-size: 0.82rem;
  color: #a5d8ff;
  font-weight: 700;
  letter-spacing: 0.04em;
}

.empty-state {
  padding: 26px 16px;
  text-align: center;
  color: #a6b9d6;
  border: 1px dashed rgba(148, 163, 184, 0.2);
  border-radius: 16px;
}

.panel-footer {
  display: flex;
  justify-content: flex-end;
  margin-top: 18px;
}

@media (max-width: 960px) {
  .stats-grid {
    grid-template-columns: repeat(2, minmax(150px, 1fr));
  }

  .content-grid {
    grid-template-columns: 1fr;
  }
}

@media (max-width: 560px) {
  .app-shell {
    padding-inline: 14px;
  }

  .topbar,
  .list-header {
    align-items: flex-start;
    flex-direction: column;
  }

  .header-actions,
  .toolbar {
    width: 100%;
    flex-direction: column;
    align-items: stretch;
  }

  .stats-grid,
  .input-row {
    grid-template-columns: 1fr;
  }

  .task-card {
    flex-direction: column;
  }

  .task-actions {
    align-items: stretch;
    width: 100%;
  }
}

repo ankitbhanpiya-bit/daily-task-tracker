@@ -1,0 +1,691 @@
+import { useEffect, useMemo, useRef, useState } from 'react';
+
+const STORAGE_KEY = 'daily-task-tracker:v1';
+const PRIORITY_ORDER = { High: 3, Medium: 2, Low: 1 };
+
+const starterTasks = [
+  {
+    id: crypto.randomUUID(),
+    title: 'Prepare sprint planning notes',
+    project: 'Product Launch',
+    category: 'Planning',
+    priority: 'High',
+    dueDate: getTodayISO(),
+    estimate: 45,
+    recurring: 'Weekly',
+    completed: false,
+    elapsedSeconds: 1200,
+    timerRunning: false,
+    lastStartedAt: null
+  },
+  {
+    id: crypto.randomUUID(),
+    title: 'Review onboarding flow',
+    project: 'UX Improvements',
+    category: 'Research',
+    priority: 'Medium',
+    dueDate: getTomorrowISO(),
+    estimate: 60,
+    recurring: 'None',
+    completed: false,
+    elapsedSeconds: 600,
+    timerRunning: true,
+    lastStartedAt: new Date(Date.now() - 10 * 60 * 1000).toISOString()
+  },
+  {
+    id: crypto.randomUUID(),
+    title: 'Client status update deck',
+    project: 'Client Work',
+    category: 'Work',
+    priority: 'Medium',
+    dueDate: getDateISO(2),
+    estimate: 90,
+    recurring: 'None',
+    completed: true,
+    elapsedSeconds: 1800,
+    timerRunning: false,
+    lastStartedAt: null
+  }
+];
+
+function getDateISO(offsetDays = 0) {
+  const date = new Date();
+  date.setHours(0, 0, 0, 0);
+  date.setDate(date.getDate() + offsetDays);
+  return date.toISOString().split('T')[0];
+}
+
+function getTodayISO() {
+  return getDateISO(0);
+}
+
+function getTomorrowISO() {
+  return getDateISO(1);
+}
+
+function getStoredTasks() {
+  const saved = localStorage.getItem(STORAGE_KEY);
+
+  if (!saved) {
+    return starterTasks;
+  }
+
+  try {
+    const parsed = JSON.parse(saved);
+    return Array.isArray(parsed) ? parsed : starterTasks;
+  } catch (error) {
+    return starterTasks;
+  }
+}
+
+function formatDuration(totalSeconds) {
+  const value = Math.max(0, Math.round(totalSeconds || 0));
+  const hours = Math.floor(value / 3600);
+  const minutes = Math.floor((value % 3600) / 60);
+  const seconds = value % 60;
+
+  if (hours > 0) {
+    return `${hours}h ${String(minutes).padStart(2, '0')}m`;
+  }
+
+  return `${String(minutes).padStart(2, '0')}m ${String(seconds).padStart(2, '0')}s`;
+}
+
+function formatMinutes(totalMinutes) {
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+
+  if (hours > 0) {
+    return `${hours}h ${String(minutes).padStart(2, '0')}m`;
+  }
+
+  return `${String(minutes).padStart(2, '0')}m`;
+}
+
+function getTaskDuration(task, referenceTime) {
+  const baseSeconds = Number(task.elapsedSeconds || 0);
+
+  if (!task.timerRunning || !task.lastStartedAt) {
+    return baseSeconds;
+  }
+
+  const startTime = new Date(task.lastStartedAt).getTime();
+  const elapsedFromStart = Math.max(0, (referenceTime - startTime) / 1000);
+  return baseSeconds + elapsedFromStart;
+}
+
+function normalizeTask(rawTask) {
+  if (!rawTask || typeof rawTask.title !== 'string') {
+    return null;
+  }
+
+  return {
+    id: rawTask.id || crypto.randomUUID(),
+    title: rawTask.title.trim(),
+    project: rawTask.project || 'General',
+    category: rawTask.category || 'Work',
+    priority: rawTask.priority || 'Medium',
+    dueDate: rawTask.dueDate || getTodayISO(),
+    estimate: Number(rawTask.estimate) || 30,
+    recurring: rawTask.recurring || 'None',
+    completed: Boolean(rawTask.completed),
+    elapsedSeconds: Number(rawTask.elapsedSeconds) || 0,
+    timerRunning: Boolean(rawTask.timerRunning),
+    lastStartedAt: rawTask.lastStartedAt || null
+  };
+}
+
+function getWeeklySummary(tasks) {
+  const summary = [];
+
+  for (let offset = 6; offset >= 0; offset -= 1) {
+    const date = new Date();
+    date.setHours(0, 0, 0, 0);
+    date.setDate(date.getDate() - offset);
+
+    const iso = date.toISOString().split('T')[0];
+    const matchingTasks = tasks.filter((task) => task.dueDate === iso);
+    const totalMinutes = matchingTasks.reduce((sum, task) => sum + Number(task.estimate || 0), 0);
+
+    summary.push({
+      iso,
+      label: date.toLocaleDateString(undefined, { weekday: 'short' }),
+      count: matchingTasks.length,
+      totalMinutes
+    });
+  }
+
+  return summary;
+}
+
+function App() {
+  const fileInputRef = useRef(null);
+  const [tasks, setTasks] = useState(getStoredTasks);
+  const [filter, setFilter] = useState('all');
+  const [search, setSearch] = useState('');
+  const [sortMode, setSortMode] = useState('due-date');
+  const [now, setNow] = useState(Date.now());
+  const [form, setForm] = useState({
+    title: '',
+    project: '',
+    category: 'Work',
+    priority: 'Medium',
+    dueDate: getTodayISO(),
+    estimate: 30,
+    recurring: 'None'
+  });
+  const [editingId, setEditingId] = useState(null);
+
+  useEffect(() => {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(tasks));
+  }, [tasks]);
+
+  useEffect(() => {
+    const interval = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(interval);
+  }, []);
+
+  const weeklySummary = useMemo(() => getWeeklySummary(tasks), [tasks]);
+
+  const filteredTasks = useMemo(() => {
+    const normalizedSearch = search.trim().toLowerCase();
+
+    const matches = tasks.filter((task) => {
+      const matchesFilter = (() => {
+        switch (filter) {
+          case 'today':
+            return task.dueDate === getTodayISO();
+          case 'upcoming':
+            return task.dueDate >= getTodayISO() && !task.completed;
+          case 'completed':
+            return task.completed;
+          case 'active':
+            return !task.completed;
+          default:
+            return true;
+        }
+      })();
+
+      const matchesSearch =
+        !normalizedSearch ||
+        task.title.toLowerCase().includes(normalizedSearch) ||
+        task.project.toLowerCase().includes(normalizedSearch) ||
+        task.category.toLowerCase().includes(normalizedSearch);
+
+      return matchesFilter && matchesSearch;
+    });
+
+    return matches.sort((taskA, taskB) => {
+      if (sortMode === 'priority') {
+        return PRIORITY_ORDER[taskB.priority] - PRIORITY_ORDER[taskA.priority] || taskA.dueDate.localeCompare(taskB.dueDate);
+      }
+
+      if (sortMode === 'project') {
+        return taskA.project.localeCompare(taskB.project) || taskA.dueDate.localeCompare(taskB.dueDate);
+      }
+
+      return taskA.dueDate.localeCompare(taskB.dueDate) || PRIORITY_ORDER[taskB.priority] - PRIORITY_ORDER[taskA.priority];
+    });
+  }, [tasks, filter, search, sortMode]);
+
+  const totals = useMemo(() => {
+    const completed = tasks.filter((task) => task.completed).length;
+    const active = tasks.filter((task) => !task.completed).length;
+    const totalEstimate = tasks.reduce((sum, task) => sum + Number(task.estimate || 0), 0);
+    const todayEstimate = tasks
+      .filter((task) => task.dueDate === getTodayISO())
+      .reduce((sum, task) => sum + Number(task.estimate || 0), 0);
+    const totalTrackedSeconds = tasks.reduce((sum, task) => sum + getTaskDuration(task, now), 0);
+
+    return {
+      completed,
+      active,
+      totalEstimate,
+      todayEstimate,
+      totalTrackedSeconds
+    };
+  }, [tasks, now]);
+
+  const projectSummary = useMemo(() => {
+    const map = new Map();
+
+    tasks.forEach((task) => {
+      const project = task.project || 'General';
+      const entry = map.get(project) || { name: project, count: 0, completed: 0, minutes: 0 };
+      entry.count += 1;
+      entry.minutes += Number(task.estimate || 0);
+      if (task.completed) entry.completed += 1;
+      map.set(project, entry);
+    });
+
+    return [...map.values()].sort((a, b) => b.minutes - a.minutes).slice(0, 5);
+  }, [tasks]);
+
+  const handleChange = (event) => {
+    const { name, value } = event.target;
+    setForm((current) => ({ ...current, [name]: value }));
+  };
+
+  const resetForm = () => {
+    setForm({
+      title: '',
+      project: '',
+      category: 'Work',
+      priority: 'Medium',
+      dueDate: getTodayISO(),
+      estimate: 30,
+      recurring: 'None'
+    });
+    setEditingId(null);
+  };
+
+  const handleSubmit = (event) => {
+    event.preventDefault();
+
+    if (!form.title.trim()) {
+      return;
+    }
+
+    const newTask = {
+      id: editingId ?? crypto.randomUUID(),
+      title: form.title.trim(),
+      project: form.project.trim() || 'General',
+      category: form.category,
+      priority: form.priority,
+      dueDate: form.dueDate,
+      estimate: Number(form.estimate) || 30,
+      recurring: form.recurring,
+      completed: editingId ? Boolean(tasks.find((task) => task.id === editingId)?.completed) : false,
+      elapsedSeconds: editingId ? Number(tasks.find((task) => task.id === editingId)?.elapsedSeconds || 0) : 0,
+      timerRunning: editingId ? Boolean(tasks.find((task) => task.id === editingId)?.timerRunning) : false,
+      lastStartedAt: editingId ? tasks.find((task) => task.id === editingId)?.lastStartedAt || null : null
+    };
+
+    if (editingId) {
+      setTasks((current) =>
+        current.map((task) => (task.id === editingId ? { ...task, ...newTask } : task))
+      );
+    } else {
+      setTasks((current) => [newTask, ...current]);
+    }
+
+    resetForm();
+  };
+
+  const handleEdit = (task) => {
+    setEditingId(task.id);
+    setForm({
+      title: task.title,
+      project: task.project,
+      category: task.category,
+      priority: task.priority,
+      dueDate: task.dueDate,
+      estimate: task.estimate,
+      recurring: task.recurring
+    });
+  };
+
+  const handleDelete = (taskId) => {
+    setTasks((current) => current.filter((task) => task.id !== taskId));
+    if (editingId === taskId) {
+      resetForm();
+    }
+  };
+
+  const handleToggleComplete = (taskId) => {
+    setTasks((current) =>
+      current.map((task) => {
+        if (task.id !== taskId) return task;
+
+        const willComplete = !task.completed;
+
+        return {
+          ...task,
+          completed: willComplete,
+          timerRunning: willComplete ? false : task.timerRunning,
+          lastStartedAt: willComplete ? null : task.lastStartedAt,
+          elapsedSeconds: willComplete ? getTaskDuration(task, Date.now()) : task.elapsedSeconds
+        };
+      })
+    );
+  };
+
+  const handleTimerToggle = (taskId) => {
+    setTasks((current) =>
+      current.map((task) => {
+        if (task.id !== taskId) return task;
+
+        if (task.timerRunning) {
+          const elapsed = getTaskDuration(task, Date.now());
+          return {
+            ...task,
+            timerRunning: false,
+            elapsedSeconds: elapsed,
+            lastStartedAt: null
+          };
+        }
+
+        return {
+          ...task,
+          timerRunning: true,
+          lastStartedAt: new Date().toISOString()
+        };
+      })
+    );
+  };
+
+  const handleExport = () => {
+    const blob = new Blob([JSON.stringify(tasks, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = 'daily-task-tracker-export.json';
+    anchor.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const handleImport = async (event) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    try {
+      const text = await file.text();
+      const parsed = JSON.parse(text);
+      const importedTasks = Array.isArray(parsed) ? parsed.map(normalizeTask).filter(Boolean) : [];
+
+      if (importedTasks.length === 0) {
+        throw new Error('No valid tasks found in file.');
+      }
+
+      setTasks(importedTasks);
+      resetForm();
+    } catch (error) {
+      window.alert(error.message || 'Unable to import file. Please use a valid JSON task export.');
+    } finally {
+      event.target.value = '';
+    }
+  };
+
+  const resetDemoData = () => {
+    setTasks(starterTasks);
+    resetForm();
+  };
+
+  return (
+    <div className="app-shell">
+      <header className="topbar">
+        <div>
+          <p className="eyebrow">Productivity dashboard</p>
+          <h1>Daily Project Tracker</h1>
+        </div>
+
+        <div className="header-actions">
+          <button className="secondary-button" onClick={() => fileInputRef.current?.click()}>
+            Import JSON
+          </button>
+          <input ref={fileInputRef} type="file" accept="application/json" hidden onChange={handleImport} />
+          <button className="secondary-button" onClick={handleExport}>
+            Export data
+          </button>
+        </div>
+      </header>
+
+      <section className="stats-grid">
+        <article className="stat-card accent-blue">
+          <span>Total tasks</span>
+          <strong>{tasks.length}</strong>
+        </article>
+        <article className="stat-card accent-green">
+          <span>Completed</span>
+          <strong>{totals.completed}</strong>
+        </article>
+        <article className="stat-card accent-orange">
+          <span>Active</span>
+          <strong>{totals.active}</strong>
+        </article>
+        <article className="stat-card accent-purple">
+          <span>Tracked time</span>
+          <strong>{formatDuration(totals.totalTrackedSeconds)}</strong>
+        </article>
+      </section>
+
+      <main className="content-grid">
+        <aside className="stack-column">
+          <section className="panel form-panel">
+            <div className="panel-header">
+              <h2>{editingId ? 'Edit task' : 'Add a new task'}</h2>
+            </div>
+
+            <form onSubmit={handleSubmit} className="task-form">
+              <label>
+                Task title
+                <input
+                  type="text"
+                  name="title"
+                  value={form.title}
+                  onChange={handleChange}
+                  placeholder="e.g. Draft launch checklist"
+                  required
+                />
+              </label>
+
+              <div className="input-row">
+                <label>
+                  Project
+                  <input
+                    type="text"
+                    name="project"
+                    value={form.project}
+                    onChange={handleChange}
+                    placeholder="Project or client"
+                  />
+                </label>
+
+                <label>
+                  Category
+                  <select name="category" value={form.category} onChange={handleChange}>
+                    <option value="Work">Work</option>
+                    <option value="Planning">Planning</option>
+                    <option value="Research">Research</option>
+                    <option value="Design">Design</option>
+                    <option value="Personal">Personal</option>
+                  </select>
+                </label>
+              </div>
+
+              <div className="input-row">
+                <label>
+                  Priority
+                  <select name="priority" value={form.priority} onChange={handleChange}>
+                    <option value="Low">Low</option>
+                    <option value="Medium">Medium</option>
+                    <option value="High">High</option>
+                  </select>
+                </label>
+
+                <label>
+                  Due date
+                  <input type="date" name="dueDate" value={form.dueDate} onChange={handleChange} />
+                </label>
+              </div>
+
+              <div className="input-row">
+                <label>
+                  Est. time (min)
+                  <input
+                    type="number"
+                    name="estimate"
+                    min="15"
+                    step="15"
+                    value={form.estimate}
+                    onChange={handleChange}
+                  />
+                </label>
+
+                <label>
+                  Recurrence
+                  <select name="recurring" value={form.recurring} onChange={handleChange}>
+                    <option value="None">None</option>
+                    <option value="Daily">Daily</option>
+                    <option value="Weekly">Weekly</option>
+                    <option value="Monthly">Monthly</option>
+                  </select>
+                </label>
+              </div>
+
+              <div className="form-actions">
+                <button type="submit" className="primary-button">
+                  {editingId ? 'Save changes' : 'Add task'}
+                </button>
+                {editingId && (
+                  <button type="button" className="secondary-button" onClick={resetForm}>
+                    Cancel
+                  </button>
+                )}
+              </div>
+            </form>
+          </section>
+
+          <section className="panel insights-panel">
+            <div className="panel-header">
+              <h2>Weekly overview</h2>
+            </div>
+
+            <div className="mini-chart" aria-label="Weekly task overview">
+              {weeklySummary.map((day) => (
+                <div key={day.iso} className="chart-bar-group">
+                  <div
+                    className="chart-bar"
+                    style={{ height: `${Math.max(12, (day.count || 0) * 20)}px` }}
+                    title={`${day.label}: ${day.count} tasks`}
+                  />
+                  <span>{day.label}</span>
+                </div>
+              ))}
+            </div>
+
+            <div className="insight-list">
+              <div>
+                <span>Planned this week</span>
+                <strong>{formatMinutes(weeklySummary.reduce((sum, day) => sum + day.totalMinutes, 0))}</strong>
+              </div>
+              <div>
+                <span>Today’s load</span>
+                <strong>{formatMinutes(totals.todayEstimate)}</strong>
+              </div>
+            </div>
+          </section>
+        </aside>
+
+        <section className="panel list-panel">
+          <div className="panel-header list-header">
+            <h2>Task board</h2>
+
+            <div className="toolbar">
+              <div className="filter-group" aria-label="Task filters">
+                <button className={filter === 'all' ? 'active' : ''} onClick={() => setFilter('all')}>
+                  All
+                </button>
+                <button className={filter === 'today' ? 'active' : ''} onClick={() => setFilter('today')}>
+                  Today
+                </button>
+                <button className={filter === 'upcoming' ? 'active' : ''} onClick={() => setFilter('upcoming')}>
+                  Upcoming
+                </button>
+                <button className={filter === 'completed' ? 'active' : ''} onClick={() => setFilter('completed')}>
+                  Done
+                </button>
+              </div>
+
+              <div className="search-block">
+                <input
+                  type="search"
+                  aria-label="Search tasks"
+                  placeholder="Search tasks or projects"
+                  value={search}
+                  onChange={(event) => setSearch(event.target.value)}
+                />
+              </div>
+
+              <select value={sortMode} onChange={(event) => setSortMode(event.target.value)}>
+                <option value="due-date">Due date</option>
+                <option value="priority">Priority</option>
+                <option value="project">Project</option>
+              </select>
+            </div>
+          </div>
+
+          <div className="project-summary">
+            {projectSummary.map((project) => (
+              <div key={project.name} className="project-pill">
+                <span>{project.name}</span>
+                <strong>{project.count}</strong>
+              </div>
+            ))}
+          </div>
+
+          <div className="task-list">
+            {filteredTasks.length === 0 ? (
+              <div className="empty-state">No tasks match your current filters.</div>
+            ) : (
+              filteredTasks.map((task) => {
+                const duration = getTaskDuration(task, now);
+                const dueSoon = task.dueDate && task.dueDate < getTodayISO() ? 'overdue' : '';
+
+                return (
+                  <article key={task.id} className={`task-card ${task.completed ? 'completed' : ''} ${dueSoon}`}>
+                    <div className="task-main">
+                      <div className="task-topline">
+                        <button
+                          className={`checkbox ${task.completed ? 'checked' : ''}`}
+                          onClick={() => handleToggleComplete(task.id)}
+                          aria-label={`Mark ${task.title} complete`}
+                        >
+                          {task.completed ? '✓' : ''}
+                        </button>
+                        <div>
+                          <h3>{task.title}</h3>
+                          <p>
+                            {task.project} · {task.category}
+                          </p>
+                        </div>
+                      </div>
+
+                      <div className="task-meta">
+                        <span className={`priority priority-${task.priority.toLowerCase()}`}>{task.priority}</span>
+                        <span>{task.recurring}</span>
+                        <span>Due: {task.dueDate}</span>
+                        <span>{task.estimate} min</span>
+                      </div>
+                    </div>
+
+                    <div className="task-actions">
+                      <div className="timer-display">{formatDuration(duration)}</div>
+                      <button className="secondary-button" onClick={() => handleTimerToggle(task.id)}>
+                        {task.timerRunning ? 'Stop timer' : 'Start timer'}
+                      </button>
+                      <button className="ghost-button" onClick={() => handleEdit(task)}>
+                        Edit
+                      </button>
+                      <button className="ghost-button danger" onClick={() => handleDelete(task.id)}>
+                        Delete
+                      </button>
+                    </div>
+                  </article>
+                );
+              })
+            )}
+          </div>
+
+          <div className="panel-footer">
+            <button className="secondary-button" onClick={resetDemoData}>
+              Reset demo data
+            </button>
+          </div>
+        </section>
+      </main>
+    </div>
+  );
+}
+
+export default App;
